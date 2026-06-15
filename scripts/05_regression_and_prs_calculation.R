@@ -1,167 +1,167 @@
 #!/usr/bin/env Rscript
-# Script: 05_regression_and_prs_calculation.R
+# Script: 05_prs_calculation_corrected.R
 # Author: Smmrithi Ravindran
-# Description: Calculate proper effect sizes using regression and compute PRS
+# Description: Calculate PRS using frequency-difference weights and classify
+#              risk using OVERALL percentile thresholds (one shared distribution).
+#              Replaces the previous version which had a bug in sex-specific
+#              percentile assignment using ifelse() on a data.table, and used
+#              incorrect 80th/20th cutoffs instead of 95th/75th/25th/5th.
 
-# Load required libraries
 library(data.table)
-library(dplyr)
 
-# Set working directory
 setwd("/ix1/vgopalakrishnan/thesis_genomics_analysis")
 
-# Load the genotype data
-geno_data <- fread("target_snps_raw.raw")
+# ── Load data ──────────────────────────────────────────────────────────────────
+geno_data <- fread("target_snps_raw_5snps.raw")
 
-# Check dimensions
-cat("Dataset dimensions:", dim(geno_data), "\n")
-cat("Number of individuals:", nrow(geno_data), "\n")
+snp_cols <- c("rs2501352_A", "rs1426810_A", "rs10965183_A",
+              "rs111339851_A", "rs7258841_A")
 
-# Extract SNP columns
-snp_cols <- grep("rs.*_A", colnames(geno_data), value = TRUE)
-cat("\nSNPs analyzed:", snp_cols, "\n\n")
+# ── Remove individuals with missing genotype data ──────────────────────────────
+complete_data <- geno_data[complete.cases(geno_data[, ..snp_cols])]
 
-# STEP 1: Calculate allele frequencies and t-tests 
-cat("Sex-Stratified Allele Frequency Analysis \n\n")
+cat("=== SAMPLE FLOW ===\n")
+cat("Raw total:            ", nrow(geno_data),     "(should be 2524)\n")
+cat("After SNP exclusions: ", nrow(complete_data), "(should be 2509)\n")
+cat("  Male:               ", sum(complete_data$SEX == 1), "(should be 1237)\n")
+cat("  Female:             ", sum(complete_data$SEX == 2), "(should be 1272)\n\n")
 
-for(snp in snp_cols) {
-  cat(" Analysis for", snp, "\n")
-  
-  # Get genotype counts by sex
-  male_geno <- geno_data[SEX == 1, get(snp)]
-  female_geno <- geno_data[SEX == 2, get(snp)]
-  
-  # Calculate allele frequencies (divide by 2 because genotypes are 0/1/2)
-  male_freq <- mean(male_geno, na.rm = TRUE) / 2
-  female_freq <- mean(female_geno, na.rm = TRUE) / 2
-  
-  cat("Male allele frequency:", round(male_freq, 4), "\n")
-  cat("Female allele frequency:", round(female_freq, 4), "\n")
-  cat("Difference:", round(female_freq - male_freq, 4), "\n")
-  
-  # Statistical test for difference
-  t_test <- t.test(male_geno, female_geno)
-  cat("T-test p-value:", t_test$p.value, "\n\n")
+# ── Calculate frequency-difference weights from full dataset ───────────────────
+cat("=== FREQUENCY-DIFFERENCE WEIGHTS ===\n")
+weights <- c()
+for (snp in snp_cols) {
+  male_freq   <- mean(complete_data[SEX == 1, get(snp)], na.rm = TRUE) / 2
+  female_freq <- mean(complete_data[SEX == 2, get(snp)], na.rm = TRUE) / 2
+  freq_diff   <- female_freq - male_freq
+  weights     <- c(weights, freq_diff)
+  cat(sprintf("%s: male=%.4f, female=%.4f, diff=%+.4f\n",
+              snp, male_freq, female_freq, freq_diff))
 }
+names(weights) <- snp_cols
 
-# STEP 2: Calculate proper effect sizes using linear regression 
-cat("\n Linear Regression Analysis for Effect Sizes \n\n")
+# ── Calculate PRS ──────────────────────────────────────────────────────────────
+score_matrix <- as.matrix(complete_data[, ..snp_cols])
+complete_data[, PRS := as.vector(score_matrix %*% weights)]
 
-effect_sizes <- c()
+# ── PRS summary by sex ─────────────────────────────────────────────────────────
+cat("\n=== PRS SUMMARY BY SEX ===\n")
+male_prs   <- complete_data[SEX == 1, PRS]
+female_prs <- complete_data[SEX == 2, PRS]
 
-for(snp in snp_cols) {
-  # Linear regression: genotype count ~ sex
-  # SEX coding: 1=male, 2=female
-  model <- glm(get(snp) ~ SEX, data = geno_data, family = gaussian())
-  
-  # Extract beta coefficient for SEX
-  beta_coef <- coef(model)[2]
-  p_value <- summary(model)$coefficients[2, 4]
-  
-  effect_sizes[snp] <- beta_coef
-  
-  cat("SNP:", snp, "\n")
-  cat("  Beta coefficient:", round(beta_coef, 4), "\n")
-  cat("  P-value:", p_value, "\n\n")
-}
+male_mean   <- mean(male_prs)
+female_mean <- mean(female_prs)
+pct_diff    <- (female_mean - male_mean) / male_mean * 100
 
-#  STEP 3: Calculate PRS using regression-derived weights 
-cat("\n Polygenic Risk Score Calculation \n")
+male_se   <- sd(male_prs)   / sqrt(length(male_prs))
+female_se <- sd(female_prs) / sqrt(length(female_prs))
 
-# Function to calculate PRS with proper beta weights
-calculate_prs <- function(genotype_data) {
-  # Extract SNP genotypes as matrix
-  snp_matrix <- as.matrix(genotype_data[, .(rs2501352_A, rs1426810_A, 
-                                             rs10965183_A, rs7258841_A)])
-  
-  # Use regression-derived beta coefficients as weights
-  weights <- c(
-    rs2501352_A = 0.0593,   # CRP
-    rs1426810_A = -0.0540,  # ADIPOQ (negative = higher in males)
-    rs10965183_A = 0.0638,  # 9p21
-    rs7258841_A = 0.0947    # APOE
-  )
-  
-  # Calculate weighted PRS for each individual
-  prs_scores <- as.vector(snp_matrix %*% weights)
-  
-  return(prs_scores)
-}
+cat(sprintf("Male mean PRS:   %.4f (95%% CI: %.3f-%.3f, SD=%.3f)\n",
+            male_mean,
+            male_mean - 1.96 * male_se,
+            male_mean + 1.96 * male_se,
+            sd(male_prs)))
+cat(sprintf("Female mean PRS: %.4f (95%% CI: %.3f-%.3f, SD=%.3f)\n",
+            female_mean,
+            female_mean - 1.96 * female_se,
+            female_mean + 1.96 * female_se,
+            sd(female_prs)))
+cat(sprintf("Sex difference:  %.1f%%\n\n", pct_diff))
 
-# Calculate PRS for all individuals
-geno_data[, PRS := calculate_prs(.SD)]
+# ── t-test ─────────────────────────────────────────────────────────────────────
+t_result <- t.test(male_prs, female_prs)
+pooled_sd <- sqrt(((length(male_prs)-1)*var(male_prs) +
+                   (length(female_prs)-1)*var(female_prs)) /
+                  (length(male_prs) + length(female_prs) - 2))
+cohens_d  <- (female_mean - male_mean) / pooled_sd
 
-# STEP 4: Calculate summary statistics by sex
-cat("\n PRS Summary by Sex\n")
+cat(sprintf("t = %.2f, df = %d, p = %.2e, Cohen's d = %.2f\n\n",
+            t_result$statistic,
+            round(t_result$parameter),
+            t_result$p.value,
+            cohens_d))
 
-summary_stats <- geno_data[, .(
-  N = .N,
-  Mean_PRS = mean(PRS),
-  SD_PRS = sd(PRS),
-  Min_PRS = min(PRS),
-  Max_PRS = max(PRS)
-), by = SEX]
+# ── OVERALL percentile thresholds (one shared distribution) ───────────────────
+# NOTE: We use OVERALL percentiles — a single threshold applied to all
+# individuals regardless of sex. This is the correct approach for asking
+# "are women more likely to be flagged as high risk by a shared clinical
+# threshold?" and is what is described in the manuscript Methods section.
+# The previous script incorrectly used sex-specific percentiles via a buggy
+# ifelse() call, and also used non-standard 80th/20th cutoffs.
 
-print(summary_stats)
+cat("=== RISK STRATIFICATION (OVERALL PERCENTILES) ===\n")
 
-# Calculate 95% confidence intervals
-calculate_ci <- function(data, conf_level = 0.95) {
-  n <- length(data)
-  mean_val <- mean(data)
-  se <- sd(data) / sqrt(n)
-  alpha <- 1 - conf_level
-  t_val <- qt(1 - alpha/2, df = n-1)
-  
-  return(list(
-    mean = mean_val,
-    lower_ci = mean_val - t_val * se,
-    upper_ci = mean_val + t_val * se
-  ))
-}
+p95 <- quantile(complete_data$PRS, 0.95)
+p75 <- quantile(complete_data$PRS, 0.75)
+p25 <- quantile(complete_data$PRS, 0.25)
+p05 <- quantile(complete_data$PRS, 0.05)
 
-male_ci <- calculate_ci(geno_data[SEX == 1, PRS])
-female_ci <- calculate_ci(geno_data[SEX == 2, PRS])
+cat(sprintf("Thresholds: <5th=%.4f, 25th=%.4f, 75th=%.4f, 95th=%.4f\n\n",
+            p05, p25, p75, p95))
 
-cat("\n Statistical Validation \n")
-cat("Males - Mean PRS:", round(male_ci$mean, 4), 
-    " (95% CI:", round(male_ci$lower_ci, 4), "-", round(male_ci$upper_ci, 4), ")\n")
-cat("Females - Mean PRS:", round(female_ci$mean, 4), 
-    " (95% CI:", round(female_ci$lower_ci, 4), "-", round(female_ci$upper_ci, 4), ")\n")
+complete_data[, Risk_Category := fcase(
+  PRS >= p95, "Very High Risk",
+  PRS >= p75, "High Risk",
+  PRS >= p25, "Intermediate Risk",
+  PRS >= p05, "Low Risk",
+  default =   "Very Low Risk"
+)]
 
-# Sex difference test
-prs_comparison <- t.test(geno_data[SEX == 1, PRS], geno_data[SEX == 2, PRS])
-cat("Sex difference p-value:", format(prs_comparison$p.value, scientific = TRUE), "\n")
+# ── Table 4 ───────────────────────────────────────────────────────────────────
+table4      <- complete_data[, .N, by = .(SEX, Risk_Category)]
+table4_wide <- dcast(table4, Risk_Category ~ SEX, value.var = "N", fill = 0)
+setnames(table4_wide, c("1", "2"), c("Male_N", "Female_N"))
 
-# Calculate percent difference
-percent_diff <- ((female_ci$mean - male_ci$mean) / male_ci$mean) * 100
-cat("Percent difference: Females", round(percent_diff, 1), "% higher than males\n")
+male_total   <- sum(complete_data$SEX == 1)
+female_total <- sum(complete_data$SEX == 2)
 
-# STEP 5: Risk stratification 
-cat("\n Risk Stratification \n")
+table4_wide[, Male_Pct   := round(Male_N   / male_total   * 100, 1)]
+table4_wide[, Female_Pct := round(Female_N / female_total * 100, 1)]
 
-# Add sex-specific percentile rankings
-geno_data[, PRS_percentile := ifelse(SEX == 1, 
-                                      rank(PRS[SEX == 1]) / sum(SEX == 1) * 100,
-                                      rank(PRS[SEX == 2]) / sum(SEX == 2) * 100)]
+# Relative difference = (female rate - male rate) / male rate * 100
+table4_wide[, Rel_Diff := round(
+  (Female_N / female_total - Male_N / male_total) /
+  (Male_N / male_total) * 100, 1)]
 
-# Create risk categories
-geno_data[, Risk_Category := ifelse(PRS_percentile >= 95, "Very High Risk",
-                              ifelse(PRS_percentile >= 80, "High Risk",
-                              ifelse(PRS_percentile <= 20, "Low Risk", 
-                                     "Intermediate Risk")))]
+cat_order   <- c("Very High Risk", "High Risk", "Intermediate Risk",
+                 "Low Risk", "Very Low Risk")
+table4_wide <- table4_wide[match(cat_order, Risk_Category)]
 
-# Risk summary by sex
-risk_summary <- geno_data[, .N, by = .(SEX, Risk_Category)]
-risk_summary_wide <- dcast(risk_summary, Risk_Category ~ SEX, value.var = "N", fill = 0)
-setnames(risk_summary_wide, c("1", "2"), c("Males", "Females"))
+cat("=== TABLE 4 ===\n")
+print(table4_wide)
 
-# Add percentages
-risk_summary_wide[, Male_Percent := round(Males / sum(Males) * 100, 1)]
-risk_summary_wide[, Female_Percent := round(Females / sum(Females) * 100, 1)]
+# High Risk Total row
+high_m <- sum(table4_wide[Risk_Category %in% c("Very High Risk","High Risk"), Male_N])
+high_f <- sum(table4_wide[Risk_Category %in% c("Very High Risk","High Risk"), Female_N])
+cat(sprintf("\nHigh Risk Total (>=75th): Male %d (%.1f%%), Female %d (%.1f%%), Rel Diff %.1f%%\n",
+            high_m, high_m/male_total*100,
+            high_f, high_f/female_total*100,
+            (high_f/female_total - high_m/male_total)/(high_m/male_total)*100))
 
-print(risk_summary_wide)
+# Verify totals
+cat(sprintf("\nMale total:   %d (should be %d) %s\n",
+            sum(table4_wide$Male_N), male_total,
+            ifelse(sum(table4_wide$Male_N)==male_total, "✓", "ERROR")))
+cat(sprintf("Female total: %d (should be %d) %s\n",
+            sum(table4_wide$Female_N), female_total,
+            ifelse(sum(table4_wide$Female_N)==female_total, "✓", "ERROR")))
 
-# Save results
-fwrite(geno_data, "results/prs_scores_final.csv")
+# ── Key manuscript figures verification ───────────────────────────────────────
+cat("\n=== MANUSCRIPT FIGURES VERIFICATION ===\n")
+vh_m <- table4_wide[Risk_Category == "Very High Risk", Male_N]
+vh_f <- table4_wide[Risk_Category == "Very High Risk", Female_N]
+vh_rel_diff <- (vh_f/female_total - vh_m/male_total) / (vh_m/male_total) * 100
+per_1000 <- (vh_f/female_total - vh_m/male_total) * 1000
 
-cat("\nAnalysis complete! Results saved to results/prs_scores_final.csv\n")
+cat(sprintf("Very High Risk males:   %d (%.1f%%)\n", vh_m, vh_m/male_total*100))
+cat(sprintf("Very High Risk females: %d (%.1f%%)\n", vh_f, vh_f/female_total*100))
+cat(sprintf("Relative difference:    %.1f%% (manuscript reports 71%%)\n", vh_rel_diff))
+cat(sprintf("Per 1,000 screened:     %.0f additional females\n", per_1000))
+
+# ── Save outputs ───────────────────────────────────────────────────────────────
+fwrite(complete_data, "results/prs_scores_final.csv")
+fwrite(table4_wide,   "results/table4_corrected.csv")
+
+cat("\n=== SAVED ===\n")
+cat("results/prs_scores_final.csv\n")
+cat("results/table4_corrected.csv\n")
+cat("\nAnalysis complete.\n")
