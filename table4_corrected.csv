@@ -1,0 +1,6 @@
+Risk_Category,Male_N,Female_N,Male_Pct,Female_Pct,Rel_Diff
+Very High Risk,58,64,4.7,5,7.3
+High Risk,245,257,19.8,20.2,2
+Intermediate Risk,620,638,50.1,50.2,0.1
+Low Risk,254,257,20.5,20.2,-1.6
+Very Low Risk,60,56,4.9,4.4,-9.2

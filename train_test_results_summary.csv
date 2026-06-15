@@ -1,0 +1,10 @@
+Metric,Value
+Training N,1766
+Testing N,758
+Training Male Mean PRS,0.123
+Training Female Mean PRS,0.1435
+Testing Male Mean PRS,0.1266
+Testing Female Mean PRS,0.1446
+Testing P-value,2.05e-02
+Testing Cohen's d,0.169
+Testing % Difference,14.2%
